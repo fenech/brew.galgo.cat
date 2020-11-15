@@ -1,0 +1,94 @@
+---
+- name: deploy web node
+  hosts: all
+  tasks:
+    - name: copy traefik config
+      ansible.posix.synchronize:
+        src: traefik/
+        dest: traefik
+
+    - name: create acme.json
+      file:
+        path: traefik/acme.json
+        state: touch
+        mode: 0600
+
+    - name: create brew pod
+      become: yes
+      containers.podman.podman_pod:
+        name: brew
+        publish:
+          - "80:80"
+          - "443:443"
+
+    - name: create traefik container
+      become: yes
+      containers.podman.podman_container:
+        state: present
+        name: traefik
+        image: traefik:v2.2
+        pod: brew
+        restart_policy: always
+        expose:
+          - "80"
+          - "443"
+        env:
+          TRAEFIK_LOG_LEVEL: ERROR
+          TRAEFIK_ACCESSLOG: "true"
+          TRAEFIK_CERTIFICATESRESOLVERS_LE: "true"
+          TRAEFIK_CERTIFICATESRESOLVERS_LE_ACME_EMAIL: tomjwfenech@gmail.com
+          TRAEFIK_CERTIFICATESRESOLVERS_LE_ACME_HTTPCHALLENGE: "true"
+          TRAEFIK_CERTIFICATESRESOLVERS_LE_ACME_HTTPCHALLENGE_ENTRYPOINT: web
+          TRAEFIK_PROVIDERS_FILE_DIRECTORY: /config
+          TRAEFIK_PROVIDERS_FILE_WATCH: "true"
+          TRAEFIK_ENTRYPOINTS_WEB: "true"
+          TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: :80
+          TRAEFIK_ENTRYPOINTS_WEBSECURE: "true"
+          TRAEFIK_ENTRYPOINTS_WEBSECURE_ADDRESS: :443
+          TRAEFIK_METRICS_PROMETHEUS: "true"
+        volume:
+          - ./traefik/acme.json:/acme.json
+          - ./traefik/dynamic/:/config/:ro
+        etc_hosts:
+          grafana: 127.0.0.1
+
+    - name: copy grafana config
+      ansible.posix.synchronize:
+        src: grafana/
+        dest: grafana
+
+    - name: create grafana container
+      become: yes
+      containers.podman.podman_container:
+        state: present
+        name: grafana
+        image: grafana/grafana-arm32v7-linux
+        pod: brew
+        restart_policy: always
+        env:
+          GF_AUTH_ANONYMOUS_ENABLED: "true"
+          GF_AUTH_ANONYMOUS_ORG_NAME: Main Org.
+          GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+        volume:
+          - ./grafana/provisioning/:/etc/grafana/provisioning/
+          - ./grafana/dashboards/:/var/lib/grafana/dashboards/
+
+    - name: generate systemd unit files
+      become: yes
+      shell: podman generate systemd -n -f brew
+
+    - name: install systemd unit files
+      become: yes
+      shell: mv {{ item }}.service /usr/lib/systemd/system/
+      with_items:
+        - pod-brew
+        - container-traefik
+        - container-grafana
+
+    - name: enable and start services
+      become: yes
+      systemd:
+        name: pod-brew
+        state: started
+        daemon_reload: yes
+        enabled: yes

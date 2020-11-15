@@ -1,0 +1,65 @@
+---
+- name: deploy pi-hole
+  hosts: all
+  vars:
+    ip: 192.168.1.65
+  tasks:
+    - name: create macvlan network
+      become: yes
+      copy:
+        src: pi-hole/macvlan.conflist.json
+        dest: /etc/cni/net.d/macvlan.conflist
+
+    - name: pull latest pi-hole image
+      become: yes
+      containers.podman.podman_image:
+        name: pihole/pihole:latest
+
+    - name: copy pi-hole config
+      become: yes
+      ansible.posix.synchronize:
+        src: pi-hole/{{ item }}
+        dest: pi-hole/
+      with_items:
+        - etc-pihole
+        - etc-dnsmasq.d
+
+    - name: create pi-hole container
+      become: yes
+      containers.podman.podman_container:
+        state: present
+        name: pi-hole
+        image: pihole/pihole:latest
+        restart_policy: always
+        network: macvlan
+        ip: "{{ ip }}"
+        cap_add:
+          - NET_ADMIN
+        dns:
+          - 127.0.0.1
+          - 1.1.1.1
+        env:
+          TZ: Europe/Madrid
+          WEBPASSWORD: "{{ lookup('password', 'credentials/pi-hole-password') }}"
+          VIRTUAL_HOST: pihole.galgo.cat
+          ServerIP: "{{ ip }}"
+        hostname: pihole
+        volume:
+          - ./pi-hole/etc-pihole/:/etc/pihole/
+          - ./pi-hole/etc-dnsmasq.d/:/etc/dnsmasq.d/
+
+    - name: generate systemd unit file
+      become: yes
+      shell: podman generate systemd -n -f pi-hole
+
+    - name: install systemd unit files
+      become: yes
+      shell: mv container-pi-hole.service /usr/lib/systemd/system/
+
+    - name: enable and start services
+      become: yes
+      systemd:
+        name: container-pi-hole
+        state: started
+        daemon_reload: yes
+        enabled: yes
